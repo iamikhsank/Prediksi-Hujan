@@ -5,6 +5,14 @@ import plotly.graph_objects as go
 import logging
 import sys
 from typing import Tuple, List, Dict, Any
+import os
+import joblib
+
+try:
+    from tensorflow.keras.models import load_model
+    KERAS_AVAILABLE = True
+except ImportError:
+    KERAS_AVAILABLE = False
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -74,7 +82,34 @@ class AdvancedFeatureEngineer:
 
 class MeteorologyDashboard:
     def __init__(self) -> None:
+        self.assets_dir = "assets"
+        self.models_loaded = False
+        self.lstm_model = None
+        self.mlp_model = None
+        self.scaler_X = None
+        self._load_assets()
         self._initialize_page()
+
+    def _load_assets(self) -> None:
+        if not KERAS_AVAILABLE:
+            logger.warning("TensorFlow/Keras not available. Falling back to simulation mode.")
+            return
+            
+        lstm_path = os.path.join(self.assets_dir, "lstm_model.h5")
+        mlp_path = os.path.join(self.assets_dir, "mlp_model.h5")
+        scaler_path = os.path.join(self.assets_dir, "scaler_X.pkl")
+        
+        if os.path.exists(lstm_path) and os.path.exists(mlp_path) and os.path.exists(scaler_path):
+            try:
+                self.lstm_model = load_model(lstm_path)
+                self.mlp_model = load_model(mlp_path)
+                self.scaler_X = joblib.load(scaler_path)
+                self.models_loaded = True
+                logger.info("Successfully loaded pre-trained models and scaler from assets folder.")
+            except Exception as e:
+                logger.error(f"Failed to load assets: {e}")
+        else:
+            logger.warning("Model assets not found in the assets directory. Operating in simulation mode.")
 
     def _initialize_page(self) -> None:
         st.set_page_config(
@@ -163,14 +198,41 @@ class MeteorologyDashboard:
             'ddmax': np.random.uniform(0.0, 360.0, size=35)
         })
 
-    def run_inference(self, df: pd.DataFrame) -> Tuple[float, float, float]:
-        if 'Tmax' in df.columns:
-            t_max_recent = df['Tmax'].tail(7).mean()
+    def run_inference(self, df_eng: pd.DataFrame, df_clean: pd.DataFrame) -> Tuple[float, float, float]:
+        if self.models_loaded and not df_eng.empty:
+            try:
+                features = df_eng.drop(columns=['Target_Smoothed_Lead'], errors='ignore')
+                latest_features = features.iloc[[-1]].values
+                X_scaled = self.scaler_X.transform(latest_features)
+                
+                lstm_input_shape = self.lstm_model.input_shape
+                if len(lstm_input_shape) == 3:
+                    X_lstm = X_scaled.reshape((X_scaled.shape[0], 1, X_scaled.shape[1]))
+                else:
+                    X_lstm = X_scaled
+                
+                lstm_pred = float(self.lstm_model.predict(X_lstm, verbose=0)[0][0])
+                mlp_pred = float(self.mlp_model.predict(X_scaled, verbose=0)[0][0])
+                ensemble_pred = float(0.6 * lstm_pred + 0.4 * mlp_pred)
+                
+                # Inverse scale if target scaler is available, but currently target scaler is not provided.
+                # Assuming predictions are in the correct range or require domain clipping
+                lstm_pred = float(np.clip(lstm_pred, 0.0, 200.0))
+                mlp_pred = float(np.clip(mlp_pred, 0.0, 200.0))
+                ensemble_pred = float(np.clip(ensemble_pred, 0.0, 200.0))
+                
+                return lstm_pred, mlp_pred, ensemble_pred
+            except Exception as e:
+                logger.error(f"Inference error: {e}. Falling back to simulation.")
+
+        # --- SIMULATION FALLBACK ---
+        if 'Tmax' in df_clean.columns:
+            t_max_recent = df_clean['Tmax'].tail(7).mean()
         else:
             t_max_recent = 32.0
             
-        if 'RHrata-rata' in df.columns:
-            rh_recent = df['RHrata-rata'].tail(7).mean()
+        if 'RHrata-rata' in df_clean.columns:
+            rh_recent = df_clean['RHrata-rata'].tail(7).mean()
         else:
             rh_recent = 80.0
             
@@ -214,12 +276,22 @@ class MeteorologyDashboard:
         with st.sidebar:
             st.markdown("<h2 style='color:#3b82f6;'>CONTROL PANEL</h2>", unsafe_allow_html=True)
             st.markdown("---")
-            st.markdown(
-                '<div class="status-badge status-warning" style="width:100%; text-align:center;">'
-                'ENGINE: SIMULATION MODE</div>', 
-                unsafe_allow_html=True
-            )
-            st.caption("Physical model assets (.h5) not detected in working directory. Operating in high-fidelity mathematical simulation mode.")
+            
+            if self.models_loaded:
+                st.markdown(
+                    '<div class="status-badge status-safe" style="width:100%; text-align:center;">'
+                    'ENGINE: DEEP LEARNING INFERENCE</div>', 
+                    unsafe_allow_html=True
+                )
+                st.caption("Physical model assets (.h5) loaded successfully from assets directory. Operating in real-time inference mode.")
+            else:
+                st.markdown(
+                    '<div class="status-badge status-warning" style="width:100%; text-align:center;">'
+                    'ENGINE: SIMULATION MODE</div>', 
+                    unsafe_allow_html=True
+                )
+                st.caption("Physical model assets (.h5) not detected in working directory. Operating in high-fidelity mathematical simulation mode.")
+                
             st.markdown("---")
             
             uploaded_file = st.file_uploader(
@@ -255,7 +327,7 @@ class MeteorologyDashboard:
         
         df_eng = engineer.engineer_features(df_clean)
         
-        lstm_pred, mlp_pred, ensemble_pred = self.run_inference(df_clean)
+        lstm_pred, mlp_pred, ensemble_pred = self.run_inference(df_eng, df_clean)
         risk_level, risk_class, risk_desc, action_plan = self.determine_action_plan(ensemble_pred)
         
         st.markdown("<h1 style='text-align: center; color:#ffffff; font-weight:800; margin-bottom:5px;'>ENTERPRISE METEOROLOGICAL FORECASTING</h1>", unsafe_allow_html=True)

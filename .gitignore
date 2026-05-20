@@ -20,11 +20,8 @@ ENV/
 .streamlit/
 
 # Machine Learning & Data Assets
-*.h5
-*.pkl
 *.csv
 *.xlsx
-export_assets/
 data/
 
 # OS specific files
