@@ -1,12 +1,25 @@
-# Web Application Framework
-streamlit>=1.30.0
+# Framework Aplikasi Web
+streamlit==1.32.2
 
-# Core Data Manipulation
-pandas>=2.0.0
-numpy>=1.24.0
+# Manipulasi & Analisis Data Inti
+pandas==2.2.2
+numpy==1.26.4
+scipy==1.12.0
 
-# Data Visualization
-plotly>=5.15.0
+# Machine Learning & Deep Learning
+scikit-learn==1.4.2
+#tensorflow==2.16.1
 
-# Data IO (Excel Reader)
-openpyxl>=3.1.0
+# Analisis Time Series
+statsmodels==0.14.1
+
+# Utilitas Model
+joblib==1.4.0
+
+# IO Data
+openpyxl==3.1.2
+
+# Visualisasi
+matplotlib==3.8.4
+seaborn==0.13.2
+plotly==5.22.0
