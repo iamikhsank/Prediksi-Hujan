@@ -1,4 +1,4 @@
-# Framework Aplikasi Web
+# Framework Web
 streamlit==1.32.2
 
 # Manipulasi & Analisis Data Inti
@@ -8,11 +8,9 @@ scipy==1.12.0
 
 # Machine Learning & Deep Learning
 scikit-learn==1.4.2
-<<<<<<< HEAD
-#tensorflow==2.16.1
-=======
-tensorflow==2.16.1
->>>>>>> 5f77dd04ecb13c572db4bf8fa0ad5c35c0ab5f68
+# Commented out by default to prevent OOM (Out Of Memory) on Streamlit Cloud Free Tier (1GB RAM limit).
+# Uncomment if deploying on environments with >= 4GB RAM (e.g. Docker, AWS, GCP).
+# tensorflow==2.16.1
 
 # Analisis Time Series
 statsmodels==0.14.1
@@ -26,8 +24,4 @@ openpyxl==3.1.2
 # Visualisasi
 matplotlib==3.8.4
 seaborn==0.13.2
-<<<<<<< HEAD
 plotly==5.22.0
-=======
-plotly==5.22.0
->>>>>>> 5f77dd04ecb13c572db4bf8fa0ad5c35c0ab5f68
