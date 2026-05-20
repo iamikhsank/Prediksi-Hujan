@@ -1,0 +1,25 @@
+# Framework Aplikasi Web
+streamlit>=1.30.0
+
+# Manipulasi & Analisis Data Inti
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Machine Learning & Deep Learning (TensorFlow)
+scikit-learn>=1.2.0
+tensorflow>=2.13.0
+
+# Analisis Runtun Waktu (Time-Series)
+statsmodels>=0.14.0
+
+# Utilitas Model
+joblib>=1.3.0
+
+# Pustaka IO Data
+openpyxl>=3.1.0
+
+# Visualisasi Data & Diagnostik
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.15.0
