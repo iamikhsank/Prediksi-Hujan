@@ -8,7 +8,7 @@ scipy>=1.10.0
 
 # Machine Learning & Deep Learning (TensorFlow)
 scikit-learn>=1.2.0
-tensorflow>=2.13.0
+tensorflow>=2.14.0
 
 # Analisis Runtun Waktu (Time-Series)
 statsmodels>=0.14.0
