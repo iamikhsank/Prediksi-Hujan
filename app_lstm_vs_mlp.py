@@ -7,12 +7,30 @@ import sys
 from typing import Tuple, List, Dict, Any
 import os
 import joblib
+import re
+import warnings
+
+warnings.filterwarnings('ignore')
 
 try:
     from tensorflow.keras.models import load_model
     KERAS_AVAILABLE = True
 except ImportError:
     KERAS_AVAILABLE = False
+
+# Pustaka Statistik & Pra-pemrosesan
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from scipy.stats import skew
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+# Pustaka Deep Learning (TensorFlow/Keras)
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, LSTM, Dropout, Input, BatchNormalization, Activation
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.regularizers import l2
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -22,8 +40,17 @@ class WeatherDataPipeline:
     def __init__(self, target_col: str = 'CH', date_col: str = 'Tanggal'):
         self.target_col = target_col
         self.date_col = date_col
+        self.scaler_X = StandardScaler()
+        self.feature_names = []
 
-    def load_and_decode(self, df: pd.DataFrame, columns_to_decode: List[str]) -> pd.DataFrame:
+    def load_and_decode(self, filepath_or_df, columns_to_decode: List[str]) -> pd.DataFrame:
+        """Load data from Excel file or use provided DataFrame"""
+        if isinstance(filepath_or_df, str):
+            print(f'[INFO] Tahap 1: Mengekstrak Data Excel ({filepath_or_df})...')
+            df = pd.read_excel(filepath_or_df, engine='openpyxl')
+        else:
+            df = filepath_or_df.copy()
+        
         df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
         df = df.loc[:, ~df.columns.duplicated()]
 
@@ -32,7 +59,36 @@ class WeatherDataPipeline:
             df = df.set_index(self.date_col).sort_index()
 
         trace_codes = ['-', '8888', '8888.0', 'TTU']
-        missing_codes = ['9999', '9999.0', '-9999', '-9999.0', '///', '#REF!', 'kosong']
+        missing_codes = ['9999', '9999.0', '-9999', '-9999.0', '///', '#REF!', 'kosong', 'NIL']
+
+        # Pemetaan Cuaca Khusus (Ordinal Severity Index)
+        if 'Cuaca Khusus' in df.columns:
+            cuaca_text = df['Cuaca Khusus'].fillna('').astype(str).str.upper().str.strip()
+            severity_index = []
+
+            for text in cuaca_text:
+                # Kelompok Kata Kunci
+                is_ts = bool(re.search(r'TS|THUNDER|LIG.*N.*G|LITHNING|TTS', text))
+                is_ra = bool(re.search(r'RA|RAIN|SH|SHOWER', text))
+                is_prec = bool(re.search(r'PREC|SL RA', text))
+                is_haze = bool(re.search(r'HAZE|HASE|FOG|FOF|MIST|MIIST|MI8T|FG|BR', text))
+
+                # Hierarki Keparahan (5.0 ke 0.0)
+                if is_ts and is_ra:
+                    severity_index.append(5.0)  # Extreme: TS + Rain
+                elif is_ts:
+                    severity_index.append(4.0)  # High: Lightning/TS
+                elif is_ra:
+                    severity_index.append(3.0)  # Moderate: Rain/Showers
+                elif is_prec:
+                    severity_index.append(2.0)  # Low: Mild Precipitation
+                elif is_haze:
+                    severity_index.append(1.0)  # Very Low: Haze/Fog
+                else:
+                    severity_index.append(0.0)  # Normal/Clear
+
+            df['Indeks_Cuaca_Khusus'] = severity_index
+            df = df.drop(columns=['Cuaca Khusus'])
 
         for col in columns_to_decode:
             if col in df.columns:
@@ -44,8 +100,10 @@ class WeatherDataPipeline:
         return df
 
     def impute_and_clean(self, df: pd.DataFrame) -> pd.DataFrame:
-        cols_to_drop = ['Tahun', 'Bulan', 'Cuaca Khusus']
+        print('[INFO] Tahap 2: Eksekusi Imputasi & Pembersihan...')
+        cols_to_drop = ['Tahun', 'Bulan', 'Tanggal.1']
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
+
         df = df.apply(pd.to_numeric, errors='coerce')
         df_clean = df.interpolate(method='time')
         df_clean = df_clean.bfill().ffill()
@@ -56,8 +114,36 @@ class AdvancedFeatureEngineer:
         self.target_col = target_col
 
     def engineer_features(self, df: pd.DataFrame, wind_cols: List[str] = ['dd', 'ddmax'], lag_days: int = 30) -> pd.DataFrame:
+        print('\n[INFO] Tahap 4: Mengeksekusi Outlier Clipping (CH: 5.0x, Others: 1.5x) & Enhanced Smoothing...')
         df_eng = df.copy()
 
+        # 1. Outlier Clipping (Winsorization) dengan logika gabungan
+        for col in df_eng.columns:
+            if df_eng[col].dtype in [np.float64, np.int64]:
+                Q1 = df_eng[col].quantile(0.25)
+                Q3 = df_eng[col].quantile(0.75)
+                IQR = Q3 - Q1
+
+                # Multiplier 5.0 untuk CH agar lebih longgar, 1.5 untuk sensor lainnya
+                multiplier = 5.0 if col == self.target_col else 1.5
+
+                lower = Q1 - multiplier * IQR
+                upper = Q3 + multiplier * IQR
+                df_eng[col] = df_eng[col].clip(lower, upper)
+
+        # 2. Enhanced Conditional Smoothing
+        ma7_context = df_eng[self.target_col].rolling(window=7, min_periods=1).mean()
+        # Menghitung durasi hujan (berapa hari dalam seminggu terakhir ada hujan > 0.5mm)
+        rain_days_count = (df_eng[self.target_col].rolling(window=7).apply(lambda x: (x > 0.5).sum()))
+
+        # Syarat Baru:
+        # 1. Nilai hari ini adalah 0
+        # 2. Rata-rata 7 hari > 1.2 mm (Intensitas)
+        # 3. Minimal 3 dari 7 hari terakhir adalah hari hujan (Persistensi)
+        condition = (df_eng[self.target_col] == 0) & (ma7_context > 1.2) & (rain_days_count >= 3)
+        df_eng[self.target_col] = np.where(condition, ma7_context, df_eng[self.target_col])
+
+        # 3. Wind and Seasonal Engineering
         for col in wind_cols:
             if col in df_eng.columns:
                 df_eng[f'{col}_sin'] = np.sin(df_eng[col] * (2. * np.pi / 360))
@@ -68,17 +154,84 @@ class AdvancedFeatureEngineer:
             df_eng['Bulan_sin'] = np.sin(df_eng.index.month * (2. * np.pi / 12))
             df_eng['Bulan_cos'] = np.cos(df_eng.index.month * (2. * np.pi / 12))
 
+        # 4. Lag & Lead Engineering
         for i in range(1, lag_days + 1):
-            if self.target_col in df_eng.columns:
-                df_eng[f'CH_lag_{i}'] = df_eng[self.target_col].shift(i)
+            df_eng[f'CH_lag_{i}'] = df_eng[self.target_col].shift(i)
 
-        if self.target_col in df_eng.columns:
-            df_eng['CH_Lead_1'] = df_eng[self.target_col].shift(-1)
-            df_eng['Target_Smoothed_Lead'] = df_eng['CH_Lead_1'].rolling(window=3, min_periods=1).mean()
-            df_eng = df_eng.drop(columns=['CH_Lead_1'])
+        df_eng['CH_Lead_1'] = df_eng[self.target_col].shift(-1)
+        df_eng['Target_Smoothed_Lead'] = df_eng['CH_Lead_1'].rolling(window=3, min_periods=1).mean()
+        df_eng = df_eng.drop(columns=['CH_Lead_1'])
 
         df_eng = df_eng.dropna()
+        print(f'[STATUS] Rekayasa fitur (dengan clipping gabungan) selesai. Dimensi: {df_eng.shape}')
         return df_eng
+
+class ComprehensiveEDA:
+    def __init__(self, target_col='CH'):
+        self.target_col = target_col
+
+    def execute_full_eda(self, df: pd.DataFrame):
+        print('\n[INFO] Tahap 3: Merender Comprehensive Exploratory Data Analysis (EDA)...')
+
+        target_skew = df[self.target_col].skew()
+        print(f'\n[STATISTIK] Skewness variabel target ({self.target_col}): {target_skew:.4f}')
+        result = adfuller(df[self.target_col].dropna())
+        print(f'[STATISTIK] Uji Stasioneritas ADF (p-value): {result[1]:.4f}')
+
+class DeepLearningArchitect:
+    def __init__(self, sequence_length: int = 7):
+        self.sequence_length = sequence_length
+
+    def split_3_way(self, data: np.ndarray, train_pct=0.75, val_pct=0.07) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        total_len = len(data)
+        train_end = int(total_len * train_pct)
+        val_end = train_end + int(total_len * val_pct)
+        return data[:train_end], data[train_end:val_end], data[val_end:]
+
+    def create_sliding_window(self, X: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        X_seq, y_seq = [], []
+        for i in range(len(X) - self.sequence_length):
+            X_seq.append(X[i:(i + self.sequence_length)])
+            y_seq.append(y[i + self.sequence_length])
+        return np.array(X_seq), np.array(y_seq)
+
+    def build_mlp_model(self, input_shape: int) -> Sequential:
+        model = Sequential([
+            Input(shape=(input_shape,)),
+            Dense(256, kernel_regularizer=l2(0.01)),
+            BatchNormalization(),
+            Activation('elu'),
+            Dropout(0.5),
+
+            Dense(128, kernel_regularizer=l2(0.01)),
+            BatchNormalization(),
+            Activation('elu'),
+            Dropout(0.5),
+
+            Dense(64, activation='elu'),
+            Dropout(0.3),
+            Dense(32, activation='elu'),
+            Dense(1, activation='linear')
+        ])
+        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.01), loss='mse', metrics=['mae'])
+        return model
+
+    def build_lstm_model(self, input_shape: Tuple[int, int]) -> Sequential:
+        model = Sequential([
+            Input(shape=input_shape),
+            LSTM(128, return_sequences=True, kernel_regularizer=l2(0.01)),
+            BatchNormalization(),
+            Dropout(0.5),
+
+            LSTM(64, return_sequences=False, kernel_regularizer=l2(0.01)),
+            BatchNormalization(),
+            Dropout(0.5),
+
+            Dense(64, activation='elu'),
+            Dense(1, activation='linear')
+        ])
+        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
+        return model
 
 class MeteorologyDashboard:
     def __init__(self) -> None:
